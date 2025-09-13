@@ -7,8 +7,8 @@
 // @match        https://preply.com/*/messages*
 // @run-at       document-start
 // @grant        GM_addStyle
-// @downloadURL  https://raw.githubusercontent.com/<you>/<repo>/main/preply-tm-guard.user.js
-// @updateURL    https://raw.githubusercontent.com/<you>/<repo>/main/preply-tm-guard.user.js
+// @downloadURL  https://raw.githubusercontent.com/mkstreet/mark-tampermonkey-preply/main/preply-tm-guard.user.js
+// @updateURL    https://raw.githubusercontent.com/mkstreet/mark-tampermonkey-preply/main/preply-tm-guard.user.js
 // ==/UserScript==
 (() => {
   'use strict';
