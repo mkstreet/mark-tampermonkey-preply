@@ -1,10 +1,14 @@
 // ==UserScript==
-// @name         Preply Messages — TM Guard v2.2
-// @description  Keep [TM] in tab title; resilient sidebar scroll persistence; restore last thread after SPA remounts.
+// @name         Preply Messages — TM Guard
+// @namespace    https://github.com/<you>/<repo>
+// @version      2.2.0
+// @description  Keep [TM] in tab title; lock sidebar scroll; restore last thread.
 // @match        https://preply.com/messages*
 // @match        https://preply.com/*/messages*
 // @run-at       document-start
 // @grant        GM_addStyle
+// @downloadURL  https://raw.githubusercontent.com/<you>/<repo>/main/preply-tm-guard.user.js
+// @updateURL    https://raw.githubusercontent.com/<you>/<repo>/main/preply-tm-guard.user.js
 // ==/UserScript==
 (() => {
   'use strict';
