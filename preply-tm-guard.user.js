@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Preply Messages — TM Guard
-// @version      2.9.0
+// @version      2.9.2
 // @description  Keep [TM] in tab title; persist sidebar scroll; restore last thread; copy FULL thread with separators.
 // @namespace    https://github.com/mkstreet
 // @match        https://preply.com/messages*
@@ -14,6 +14,7 @@
 // ==/UserScript==
 (() => {
   'use strict';
+
   const log = (...a) => console.log('[TM Guard]', ...a);
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   const addStyle = (css) => { try { (typeof GM_addStyle==='function') ? GM_addStyle(css) : (()=>{ const s=document.createElement('style'); s.textContent=css; document.head.appendChild(s); })(); } catch{} };
@@ -21,7 +22,7 @@
   // ---------- Title guard ----------
   const PREFIX='[TM] ';
   const ensureTitle=()=>{ try{ const t=document.title||''; if(!t.startsWith(PREFIX)){ document.title=PREFIX+t.replace(/^\[TM\]\s*/,''); log('title patched →',document.title);} }catch{} };
-  const observeTitle=()=>{ let titleEl=document.querySelector('head > title'); if(!titleEl){ titleEl=document.createElement('title'); document.head.appendChild(titleEl); }
+  const wireTitle=()=>{ let titleEl=document.querySelector('head > title'); if(!titleEl){ titleEl=document.createElement('title'); document.head.appendChild(titleEl); }
     const tn=titleEl.firstChild||titleEl.appendChild(document.createTextNode(document.title||'')); new MutationObserver(ensureTitle).observe(tn,{characterData:true});
     new MutationObserver(ensureTitle).observe(document.head,{childList:true,subtree:true});
     ['pushState','replaceState'].forEach(fn=>{ const orig=history[fn]; history[fn]=function(...args){ const r=orig.apply(this,args); queueMicrotask(()=>dispatchEvent(new Event('tm:route'))); queueMicrotask(ensureTitle); return r; };});
@@ -40,57 +41,104 @@
   const mountCopyButton=()=>{ if(!document.getElementById('tm-copy-btn')){ const btn=document.createElement('button'); btn.id='tm-copy-btn'; btn.type='button'; btn.title='Copy full thread (auto-load older messages)'; btn.textContent='Copy Thread'; btn.addEventListener('click',()=>copyThread({deep:true})); document.body.appendChild(btn);} };
   new MutationObserver(()=>{ mountBadge(); mountCopyButton(); }).observe(document.documentElement,{childList:true,subtree:true});
 
-  // ---------- Sidebar scroll + last selection (hardened) ----------
+  // ---------- Sidebar scroll (hardened) ----------
   const KEY='tm_preply_scroll';
   const LAST='tm_preply_lasthref';
-  const qIndex=()=>document.querySelector('[data-qa-id="omni-hub"]');
+
+  const isScrollable=(el)=>!!el && el.scrollHeight>el.clientHeight && /auto|scroll/i.test(getComputedStyle(el).overflowY||'');
+  const ancestors=(el)=>{ const a=[]; for(let n=el; n && n!==document.documentElement; n=n.parentElement) a.push(n); return a; };
+
+  // Find the sidebar: prefer known qa-id; otherwise choose the scrollable ancestor with the most /messages/* links (robust to DOM changes/locales)
+  const findIndexContainer=()=>{
+    let el=document.querySelector('[data-qa-id="omni-hub"]');
+    if(el) return el;
+    const links=[...document.querySelectorAll('a[href^="/en/messages/"],a[href^="/messages/"]')];
+    if(!links.length) return null;
+    const counts=new Map();
+    for(const a of links){
+      const sc=ancestors(a).find(isScrollable);
+      if(!sc) continue;
+      counts.set(sc,(counts.get(sc)||0)+1);
+    }
+    let best=null, bestCount=0;
+    for(const [sc,c] of counts.entries()){ if(c>bestCount){ best=sc; bestCount=c; } }
+    return best;
+  };
+
+  const qIndex=()=>findIndexContainer();
 
   const saveScroll=(src)=>{ const el=qIndex(); if(!el) return; const st=el.scrollTop|0; localStorage.setItem(KEY,String(st)); log('saved scrollTop',st,`(${src})`); };
   const saveLastFromEvent=(e)=>{ const a=e.target && e.target.closest && e.target.closest('a[href^="/en/messages/"],a[href^="/messages/"]'); if(a){ localStorage.setItem(LAST,a.getAttribute('href')); queueMicrotask(()=>saveScroll('click')); } };
 
-  // Sticky restore keeps forcing the saved position briefly in case React resets it
-  const stickyRestore=(el,target,{ms=2500,intervalRaf=true}={})=>{
+  const stickyRestore=(el,target,{ms=2500}={})=>{
     const t0=performance.now();
-    const tick=()=>{ if(performance.now()-t0>ms) return;
+    (function tick(){
+      if(performance.now()-t0>ms) return;
       if(Math.abs(el.scrollTop-target)>1) el.scrollTop=target;
-      (intervalRaf?requestAnimationFrame: setTimeout)(tick, intervalRaf? undefined: 50);
-    };
-    tick();
+      requestAnimationFrame(tick);
+    })();
   };
 
   const doRestore=()=>{
-    const el=qIndex(); if(!el) return false;
+    const el=qIndex(); if(!el){ log('restore: index container not found'); return false; }
     const v=parseInt(localStorage.getItem(KEY)||'0',10)||0;
-    if(v) { stickyRestore(el, v); log('restore attempt →', v); }
-    const href=localStorage.getItem(LAST);
-    if(href){ const a=document.querySelector(`a[href="${href}"]`); if(a&&a.scrollIntoView){ a.scrollIntoView({block:'center'}); a.style.outline='2px solid currentColor'; setTimeout(()=>{ a.style.outline=''; },700); log('focus restored →', href); } }
-    return !!v || !!href;
+    const href=localStorage.getItem(LAST)||'';
+    let did=false;
+    if(href){
+      const a=document.querySelector(`a[href="${href}"]`);
+      if(a && a.scrollIntoView){ a.scrollIntoView({block:'center'}); a.style.outline='2px solid currentColor'; setTimeout(()=>{ a.style.outline=''; },700); log('focus restored →', href); did=true; }
+    }
+    if(v){ stickyRestore(el, v); log('restore attempt →', v); did=true; }
+    return did;
   };
 
-  // Observe index mutations; re-apply restore when React reflows the list
   const armIndexObserver=()=>{
     const el=qIndex(); if(!el || el._tmObserved) return;
     el._tmObserved=true;
     const mo=new MutationObserver(()=>{ doRestore(); });
     mo.observe(el,{childList:true,subtree:true});
     el.addEventListener('scroll',()=>{ clearTimeout(el._tm_t); el._tm_t=setTimeout(()=>saveScroll('scroll'),120); },{passive:true});
+    log('index observer armed');
   };
 
-  // Fire restores at moments the app is likely to re-render
-  addEventListener('pageshow',()=> setTimeout(()=>{ doRestore(); armIndexObserver(); }, 0));
-  addEventListener('tm:route',()=> setTimeout(()=>{ doRestore(); armIndexObserver(); }, 50));
-  addEventListener('popstate',()=> setTimeout(()=>{ doRestore(); armIndexObserver(); }, 50));
-  addEventListener('DOMContentLoaded',()=> setTimeout(()=>{ doRestore(); armIndexObserver(); }, 150));
+  // After a route/reload, keep retrying restore until it sticks or we time out
+  const navRestoreLoop=(label)=>{
+    log('navRestore start:', label);
+    const t0=performance.now();
+    let tries=0, applied=false;
+    const iv=setInterval(()=>{
+      tries++;
+      const el=qIndex();
+      if(el){
+        armIndexObserver();
+        const did=doRestore();
+        applied = applied || did;
+        // Stop when we’ve applied and the list isn’t at the very top anymore
+        if(did && el.scrollTop>0){
+          clearInterval(iv);
+          log('navRestore done in', Math.round(performance.now()-t0),'ms; tries=',tries,'scrollTop=',el.scrollTop);
+        }
+      }
+      if(performance.now()-t0>12000){
+        clearInterval(iv);
+        log('navRestore timeout after', tries, 'tries');
+      }
+    },150);
+  };
 
-  // Save more aggressively so full reloads don’t lose position
+  // Fire the loop at all the likely times
+  addEventListener('pageshow', ()=> navRestoreLoop('pageshow'));
+  addEventListener('tm:route', ()=> navRestoreLoop('tm:route'));
+  addEventListener('popstate', ()=> navRestoreLoop('popstate'));
+  addEventListener('DOMContentLoaded', ()=> setTimeout(()=>navRestoreLoop('domcontentloaded'), 100));
+
+  // Aggressive save to survive hard reloads
   addEventListener('beforeunload',()=>saveScroll('beforeunload'));
   addEventListener('pagehide',()=>saveScroll('pagehide'));
   document.addEventListener('click', saveLastFromEvent, true);
 
   // ---------- Thread copy (with separators & deep load) ----------
   const SEPARATOR = '\n\n────────────────────────────────\n\n';
-  const isScrollable=(el)=>!!el && el.scrollHeight>el.clientHeight && getComputedStyle(el).overflowY.match(/auto|scroll/);
-  const ancestors=(el)=>{ const a=[]; for(let n=el; n && n!==document.documentElement; n=n.parentElement) a.push(n); return a; };
   const findThreadContainer=()=> {
     const sel = [
       '[data-qa-id*="thread" i]','[data-qa-id*="chat" i]','[data-qa-id*="conversation" i]',
@@ -190,6 +238,11 @@
   // ---------- Boot ----------
   const ready=(fn)=> (document.readyState==='loading') ? document.addEventListener('DOMContentLoaded',fn) : fn();
   log('userscript loaded', location.href);
-  observeTitle(); mountBadge(); mountCopyButton();
-  ready(()=>{ doRestore(); armIndexObserver(); });
+  wireTitle(); mountBadge(); mountCopyButton();
+  ready(()=>{ navRestoreLoop('ready'); });
+
+  // Extra: log saves from clicks
+  document.addEventListener('click', (e)=>{ /* already saving via saveLastFromEvent */ }, true);
+  document.addEventListener('click', saveLastFromEvent, true);
+  addEventListener('beforeunload',()=>saveScroll('beforeunload'));
 })();
