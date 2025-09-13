@@ -1,23 +1,27 @@
 // ==UserScript==
 // @name         Preply Messages — TM Guard
-// @version      2.5.0
-// @description  Keep [TM] in tab title; lock sidebar scroll; restore last thread; copy FULL thread.
+// @version      2.6.0
+// @description  Keep [TM] in tab title; persist sidebar scroll; restore last thread; copy FULL thread.
 // @namespace    https://github.com/mkstreet
 // @match        https://preply.com/messages*
 // @match        https://preply.com/*/messages*
 // @run-at       document-start
 // @grant        GM_addStyle
 // @grant        GM_setClipboard
+// @grant        GM_registerMenuCommand
 // @downloadURL  https://raw.githubusercontent.com/mkstreet/mark-tampermonkey-preply/main/preply-tm-guard.user.js
 // @updateURL    https://raw.githubusercontent.com/mkstreet/mark-tampermonkey-preply/main/preply-tm-guard.user.js
-// @homepageURL  https://github.com/mkstreet/mark-tampermonkey-preply
-// @supportURL   https://github.com/mkstreet/mark-tampermonkey-preply/issues
 // ==/UserScript==
 (() => {
   'use strict';
   const log = (...a) => console.log('[TM Guard]', ...a);
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  const addStyle = (css) => {
+    try { (typeof GM_addStyle === 'function') ? GM_addStyle(css) : (() => { const s=document.createElement('style'); s.textContent=css; document.head.appendChild(s); })(); }
+    catch { /* ignore */ }
+  };
 
-  // ---- Title guard ----
+  // ---------- Title guard ----------
   const PREFIX = '[TM] ';
   const ensureTitle = () => {
     try {
@@ -33,72 +37,59 @@
     if (!titleEl) { titleEl = document.createElement('title'); document.head.appendChild(titleEl); }
     const tn = titleEl.firstChild || titleEl.appendChild(document.createTextNode(document.title || ''));
     new MutationObserver(ensureTitle).observe(tn, { characterData: true });
-    new MutationObserver(ensureTitle).observe(document.head, { childList: true });
+    new MutationObserver(ensureTitle).observe(document.head, { childList: true, subtree: true });
     ['pushState','replaceState'].forEach(fn => {
       const orig = history[fn];
       history[fn] = function(...args){ const r = orig.apply(this,args); queueMicrotask(ensureTitle); return r; };
     });
     addEventListener('popstate', ensureTitle);
-    document.addEventListener('visibilitychange', ensureTitle);
+    addEventListener('visibilitychange', ensureTitle);
     ensureTitle();
   };
 
-  // ---- Badges / UI ----
-  try {
-    GM_addStyle(`
-      #tm-guard-badge{position:fixed;left:8px;bottom:8px;padding:2px 6px;border-radius:6px;background:rgba(0,0,0,.6);color:#fff;font:12px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial,sans-serif;z-index:2147483647;pointer-events:none;}
-      #tm-copy-thread{position:fixed;right:8px;bottom:8px;padding:6px 9px;border-radius:8px;background:rgba(0,0,0,.68);color:#fff;font:12px/1.25 system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial,sans-serif;z-index:2147483647;border:0;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.25)}
-      #tm-copy-thread:hover{filter:brightness(1.08)}
-      #tm-toast{position:fixed;right:8px;bottom:44px;padding:6px 10px;border-radius:8px;background:rgba(0,0,0,.82);color:#fff;font:12px system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial,sans-serif;z-index:2147483647;pointer-events:none;opacity:0;transition:opacity .15s ease}
-      #tm-toast.show{opacity:1}
-    `);
-    const b = document.createElement('div');
-    b.id = 'tm-guard-badge';
-    b.textContent = 'TM: Guard ON';
-    document.body.appendChild(b);
+  // ---------- UI: badge + toast + copy button ----------
+  addStyle(`
+    #tm-guard-badge{position:fixed;left:8px;bottom:8px;padding:2px 6px;border-radius:6px;background:rgba(0,0,0,.6);color:#fff;font:12px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial,sans-serif;z-index:2147483647;pointer-events:none}
+    #tm-toast{position:fixed;right:12px;bottom:12px;max-width:70ch;background:rgba(0,0,0,.85);color:#fff;padding:.5rem .6rem;border-radius:10px;font:12px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial,sans-serif;z-index:2147483647;box-shadow:0 4px 16px rgba(0,0,0,.3)}
+    #tm-copy-btn{position:fixed;top:72px;right:12px;padding:.35rem .55rem;border-radius:10px;background:rgba(0,0,0,.6);color:#fff;font:12px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial,sans-serif;z-index:2147483647;border:0;cursor:pointer}
+    #tm-copy-btn:hover{background:rgba(0,0,0,.75)}
+  `);
+  const mountBadge = () => {
+    if (!document.getElementById('tm-guard-badge')) {
+      const b = document.createElement('div');
+      b.id = 'tm-guard-badge';
+      b.textContent = 'TM: Guard ON';
+      (document.documentElement || document.body).appendChild(b);
+    }
+  };
+  const toast = (txt, ms=2200) => {
+    try {
+      let n = document.getElementById('tm-toast');
+      if (!n) { n = document.createElement('div'); n.id='tm-toast'; document.body.appendChild(n); }
+      n.textContent = txt;
+      n.style.display = 'block';
+      clearTimeout(n._t);
+      n._t = setTimeout(()=>{ n.style.display='none'; }, ms);
+    } catch {}
+  };
+  const mountCopyButton = () => {
+    if (!document.getElementById('tm-copy-btn')) {
+      const btn = document.createElement('button');
+      btn.id = 'tm-copy-btn';
+      btn.type = 'button';
+      btn.title = 'Copy full thread (auto-load older messages)';
+      btn.textContent = 'Copy Thread';
+      btn.addEventListener('click', () => copyThread({ deep:true }));
+      document.body.appendChild(btn);
+    }
+  };
+  // Re-mount UI if the SPA nukes the DOM
+  new MutationObserver(() => { mountBadge(); mountCopyButton(); }).observe(document.documentElement, { childList:true, subtree:true });
 
-    const btn = document.createElement('button');
-    btn.id = 'tm-copy-thread';
-    btn.type = 'button';
-    btn.title = 'Copy FULL thread (auto-load older)\nHotkeys: Alt+Shift+C = full, Alt+C = visible';
-    btn.textContent = 'Copy FULL thread';
-    document.body.appendChild(btn);
-
-    const toast = document.createElement('div');
-    toast.id = 'tm-toast';
-    document.body.appendChild(toast);
-
-    const showToast = (msg) => {
-      toast.textContent = msg;
-      toast.classList.add('show');
-      clearTimeout(showToast._t);
-      showToast._t = setTimeout(()=>toast.classList.remove('show'), 1400);
-    };
-
-    btn.addEventListener('click', async () => {
-      const n = await copyThread({ full: true });
-      if (n && n.copied > 0) showToast(`Copied ${n.copied} msg${n.copied>1?'s':''} (${n.chars} chars)`);
-      else showToast('Nothing to copy');
-    });
-
-    // Hotkeys:
-    // Alt+Shift+C -> FULL thread
-    // Alt+C        -> Visible only
-    addEventListener('keydown', async (e) => {
-      if (e.altKey && (e.key === 'c' || e.key === 'C')) {
-        e.preventDefault();
-        const full = !!e.shiftKey;
-        const n = await copyThread({ full });
-        if (n && n.copied > 0) showToast(`Copied ${n.copied} msg${n.copied>1?'s':''} (${n.chars} chars)`);
-        else showToast('Nothing to copy');
-      }
-    });
-  } catch {}
-
-  // ---- Sidebar scroll persistence ----
+  // ---------- Sidebar scroll + last selection ----------
   const KEY = 'tm_preply_scroll';
   const LAST = 'tm_preply_lasthref';
-  const qIndex = () => document.querySelector('[data-qa-id="omni-hub"]');
+  const qIndex = () => document.querySelector('[data-qa-id="omni-hub"]'); // sidebar list container
 
   const saveScroll = (src) => {
     const el = qIndex(); if (!el) return;
@@ -113,7 +104,7 @@
     log('restored scrollTop', v);
   };
   const rememberClick = (e) => {
-    const a = e.target.closest('a[href^="/en/messages/"],a[href^="/messages/"]');
+    const a = e.target && e.target.closest && e.target.closest('a[href^="/en/messages/"],a[href^="/messages/"]');
     if (a) {
       localStorage.setItem(LAST, a.getAttribute('href'));
       queueMicrotask(() => saveScroll('click'));
@@ -131,218 +122,180 @@
     }
   };
 
-  // ---- Copy Thread (FULL capture) ----
-  const THREAD_CANDIDATES = [
-    '[data-qa-id="message-list"]',
-    '[data-qa-id="messages-thread"]',
-    '[data-qa-id="omni-thread"]',
-    '[data-testid="chat-thread"]',
-    '[aria-label="Conversation"]',
-    '[class*="thread"] [role="list"]',
-    '[class*="Messages"] [role="list"]',
-    '[data-qa-id="chat-panel"]',
-  ];
-  const MSG_ITEM_CANDIDATES = [
-    '[data-qa-id="message-item"]',
-    '[data-qa-id^="message-"]',
-    '[data-testid="message-item"]',
-    '[role="listitem"]',
-    '[class*="messageItem"]',
-    '[class*="MessageBubble"]',
-    'article',
-    'li',
-  ];
+  // ---------- Thread detection & copy ----------
+  // Heuristic: find the main thread scroll container (not the sidebar)
+  const isScrollable = (el) => !!el && el.scrollHeight > el.clientHeight && getComputedStyle(el).overflowY.match(/auto|scroll/);
+  const ancestors = (el) => { const a=[]; for(let n=el; n && n!==document.documentElement; n=n.parentElement) a.push(n); return a; };
 
-  const ready = (fn) => (document.readyState === 'loading') ? document.addEventListener('DOMContentLoaded', fn) : fn();
-  addEventListener('pageshow', () => setTimeout(() => { ensureTitle(); restoreScroll(); focusLast(); }, 0));
+  const findThreadContainer = () => {
+    // Prefer obvious candidates
+    const candidates = [
+      // common patterns; site may change — we keep this broad + fallbacks
+      '[data-qa-id*="thread" i]',
+      '[data-qa-id*="chat" i]',
+      '[class*="thread" i]',
+      '[class*="conversation" i]',
+      '[class*="messages" i]',
+      'main [role="region"]',
+    ].map(s => [...document.querySelectorAll(s)]).flat();
 
-  function findThreadContainer() {
-    for (const sel of THREAD_CANDIDATES) {
-      const el = document.querySelector(sel);
-      if (!el) continue;
-      if (el.querySelector(MSG_ITEM_CANDIDATES.join(','))) return el;
+    // Filter to scrollables, not inside the sidebar
+    const sidebar = qIndex();
+    const notInSidebar = (el) => !sidebar || !sidebar.contains(el);
+    const scrollables = candidates
+      .filter(el => notInSidebar(el))
+      .map(el => ancestors(el).find(isScrollable) || el)
+      .filter(isScrollable);
+
+    // Choose the biggest one (middle pane tends to be the largest)
+    let best = null, bestArea = 0;
+    for (const el of scrollables) {
+      const r = el.getBoundingClientRect();
+      const area = Math.round(r.width * r.height);
+      if (area > bestArea) { bestArea = area; best = el; }
     }
-    // Fallback: middle column in 3-col layout
-    const middle = document.querySelector('[data-qa-id="omni-hub"]')?.parentElement?.nextElementSibling;
-    if (middle && middle.querySelector(MSG_ITEM_CANDIDATES.join(','))) return middle;
-    // Final fallback: main scroll element
-    return document.querySelector('[role="main"]') || document.body;
-  }
 
-  function isScrollable(el) {
-    const s = getComputedStyle(el);
-    return /(auto|scroll)/.test(s.overflowY || '') && el.scrollHeight > el.clientHeight + 3;
-  }
-
-  function pickScrollElement(start) {
-    let el = start;
-    while (el && !isScrollable(el)) el = el.parentElement;
-    return el || document.scrollingElement || document.documentElement || document.body;
-  }
-
-  function findMessageItems(container) {
-    const items = Array.from(container.querySelectorAll(MSG_ITEM_CANDIDATES.join(',')));
-    return items.filter((el) => {
-      const t = el.textContent?.trim() || '';
-      if (!t) return false;
-      if (/^\d{1,2}:\d{2}\s*(AM|PM)?$/.test(t)) return false; // timestamp-only rows
-      if (/^(Seen|Delivered|Edited)$/i.test(t)) return false;
-      return true;
-    });
-  }
-
-  function extractMessageText(el) {
-    const clone = el.cloneNode(true);
-    clone.querySelectorAll('script,style,svg,button,menu,[role="button"],time,[data-qa-id*="status"],[class*="status"]').forEach(n=>n.remove());
-    let txt = (clone.textContent || '')
-      .replace(/\u00a0/g,' ')
-      .replace(/[ \t]{2,}/g,' ')
-      .replace(/\n[ \t]+/g,'\n')
-      .replace(/\n{3,}/g, '\n\n')
-      .trim();
-    return txt;
-  }
-
-  function messageKey(el) {
-    const id = el.getAttribute('data-id') || el.getAttribute('data-message-id') || el.id || '';
-    const timeEl = el.querySelector('time');
-    const ts = (timeEl?.getAttribute('datetime') || timeEl?.textContent || '').trim();
-    const txt = (el.textContent || '').trim().slice(0, 120);
-    return [id, ts, txt].filter(Boolean).join('#');
-  }
-
-  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-
-  async function autoLoadAll(container, scroller) {
-    // Try to reveal all older messages by reaching the very top repeatedly.
-    let attempts = 0, stable = 0;
-    let lastCount = 0, lastHeight = 0;
-    const maxAttempts = 40;
-
-    while (attempts++ < maxAttempts) {
-      // Click any obvious "Load older" / "Show previous" buttons
-      const moreBtn = container.querySelector('button, a');
-      if (moreBtn) {
-        const label = (moreBtn.innerText || moreBtn.textContent || '').trim().toLowerCase();
-        if (/older|previous|earlier|load more|see more|show more/.test(label)) moreBtn.click();
+    // Fallback: pick the largest scrollable in the page that isn’t the sidebar
+    if (!best) {
+      const allScrollables = [...document.querySelectorAll('*')].filter(isScrollable).filter(notInSidebar);
+      for (const el of allScrollables) {
+        const r = el.getBoundingClientRect();
+        const area = Math.round(r.width * r.height);
+        if (area > bestArea) { bestArea = area; best = el; }
       }
-      scroller.scrollTop = 0;
-      await sleep(250);
+    }
 
-      const count = findMessageItems(container).length;
-      const h = scroller.scrollHeight;
+    if (best) log('thread container detected:', best);
+    return best;
+  };
 
-      if (count <= lastCount && h <= lastHeight + 2) {
-        if (++stable >= 3) break; // no new items for a few cycles
-      } else {
-        stable = 0;
-      }
-      lastCount = count;
+  const waitForThread = async (ms=8000) => {
+    const t0 = performance.now();
+    let el = findThreadContainer();
+    while (!el && (performance.now()-t0) < ms) {
+      await sleep(200);
+      el = findThreadContainer();
+    }
+    return el;
+  };
+
+  // Try to auto-load older messages by scrolling to top repeatedly until nothing new loads
+  const loadAllAbove = async (el, opts={maxMs:8000, maxPasses:50}) => {
+    const t0 = performance.now();
+    let lastHeight = -1;
+    let passes = 0;
+    // scroll to top once to trigger loader
+    el.scrollTop = 0;
+    await sleep(200);
+    while ((performance.now()-t0) < opts.maxMs && passes < opts.maxPasses) {
+      passes++;
+      const h = el.scrollHeight;
+      if (h === lastHeight) break; // no new content
       lastHeight = h;
+      el.scrollTop = 0;
+      // Allow network/render
+      await sleep(250);
     }
-  }
+    log('auto-load passes:', passes, 'duration(ms):', Math.round(performance.now()-t0));
+  };
 
-  async function sweepCollect(container, scroller) {
-    // From top to bottom, collect messages even in virtualized lists.
-    const saved = scroller.scrollTop;
-    const seen = new Set();
-    const ordered = [];
+  // Extract clean text from the thread container
+  const extractThreadText = (el) => {
+    // Clone so we can prune controls without touching live DOM
+    const clone = el.cloneNode(true);
 
-    scroller.scrollTop = 0;
-    await sleep(80);
+    // Remove composer / inputs / buttons / media
+    clone.querySelectorAll('textarea, input, [contenteditable], button, svg, video, audio, style, script, [role="textbox"], [data-qa-id*="composer" i], [data-qa-id*="input" i]').forEach(n => n.remove());
 
-    let bottomStreak = 0;
-    let guard = 0;
+    // Sometimes timestamps / meta are helpful; we keep them (innerText preserves line breaks).
+    const text = (clone.innerText || '').trim()
+      // de-dup excessive blank lines
+      .replace(/\n{3,}/g, '\n\n');
 
-    while (guard++ < 200) {
-      const items = findMessageItems(container);
-      for (const el of items) {
-        const key = messageKey(el);
-        if (key && !seen.has(key)) {
-          seen.add(key);
-          const txt = extractMessageText(el);
-          if (txt) ordered.push(txt);
-        }
-      }
+    return text;
+  };
 
-      const atBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 2;
-      if (atBottom) {
-        if (++bottomStreak >= 2) break; // confirm
-      } else {
-        bottomStreak = 0;
-      }
-
-      const step = Math.max(80, Math.floor(scroller.clientHeight * 0.9));
-      scroller.scrollTop = Math.min(scroller.scrollTop + step, scroller.scrollHeight);
-      await sleep(60);
-    }
-
-    // Restore user position
-    scroller.scrollTop = saved;
-    return ordered;
-  }
-
-  async function copyToClipboard(text) {
+  const copyToClipboard = async (text) => {
     try {
       if (typeof GM_setClipboard === 'function') {
         GM_setClipboard(text, { type: 'text', mimetype: 'text/plain' });
         return true;
       }
+    } catch {}
+    try {
       if (navigator.clipboard && window.isSecureContext) {
         await navigator.clipboard.writeText(text);
         return true;
       }
+    } catch {}
+    // Fallback
+    try {
       const ta = document.createElement('textarea');
-      ta.style.position = 'fixed';
-      ta.style.opacity = '0';
       ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.left = '-9999px';
       document.body.appendChild(ta);
       ta.select();
-      const ok = document.execCommand('copy');
+      document.execCommand('copy');
       ta.remove();
-      return ok;
+      return true;
+    } catch {}
+    return false;
+  };
+
+  const copyThread = async ({deep=false} = {}) => {
+    try {
+      const container = await waitForThread(12000);
+      if (!container) {
+        toast('TM: Could not find the message thread.');
+        log('copyThread: no container found');
+        return;
+      }
+      if (deep) await loadAllAbove(container, {maxMs: 12000, maxPasses: 80});
+      const text = extractThreadText(container);
+      if (!text) {
+        toast('TM: Thread is empty or not detected.');
+        log('copyThread: empty text');
+        return;
+      }
+      const ok = await copyToClipboard(text);
+      toast(ok ? `TM: Thread copied (${text.length.toLocaleString()} chars).` : 'TM: Copy failed (clipboard blocked).');
+      log('copied thread chars:', text.length);
     } catch (e) {
-      console.warn('[TM Guard] clipboard failed', e);
-      return false;
+      log('copyThread error:', e);
+      toast('TM: Error while copying thread (see console).');
     }
-  }
+  };
 
-  async function copyThread({ full }) {
-    // If user selected some text, honor that (quick exact copy)
-    const sel = getSelection && getSelection();
-    if (!full && sel && !sel.isCollapsed) {
-      const txt = sel.toString();
-      const ok = await copyToClipboard(txt);
-      log('copied selection', ok ? txt.length : 'fail');
-      return { copied: ok ? 1 : 0, chars: txt.length|0, selection: true };
+  // keyboard shortcut: Ctrl/Cmd + Shift + C
+  addEventListener('keydown', (e) => {
+    const mac = navigator.platform.toUpperCase().includes('MAC');
+    const meta = mac ? e.metaKey : e.ctrlKey;
+    if (meta && e.shiftKey && (e.key === 'C' || e.key === 'c')) {
+      e.preventDefault();
+      copyThread({ deep:true });
     }
+  }, true);
 
-    const container = findThreadContainer();
-    if (!container) { log('thread container not found'); return { copied: 0, chars: 0 }; }
-    const scroller = pickScrollElement(container);
-
-    if (full) {
-      await autoLoadAll(container, scroller);
-      const msgs = await sweepCollect(container, scroller);
-      const out = msgs.join('\n\n');
-      const ok = await copyToClipboard(out);
-      log('copied FULL thread', ok ? `${msgs.length} msgs, ${out.length} chars` : 'fail');
-      return { copied: ok ? msgs.length : 0, chars: ok ? out.length : 0 };
-    } else {
-      // Visible-only
-      const items = findMessageItems(container);
-      const texts = items.map(extractMessageText).filter(Boolean);
-      const joined = texts.join('\n\n');
-      const ok = await copyToClipboard(joined);
-      log('copied VISIBLE thread', ok ? `${texts.length} msgs, ${joined.length} chars` : 'fail');
-      return { copied: ok ? texts.length : 0, chars: ok ? joined.length : 0 };
+  // Tampermonkey menu
+  try {
+    if (typeof GM_registerMenuCommand === 'function') {
+      GM_registerMenuCommand('Copy current thread (deep)', () => copyThread({deep:true}));
+      GM_registerMenuCommand('Copy current thread (visible only)', () => copyThread({deep:false}));
     }
-  }
+  } catch {}
 
-  // Boot
+  // ---------- Boot ----------
+  const ready = (fn) => (document.readyState === 'loading') ? document.addEventListener('DOMContentLoaded', fn) : fn();
+
   log('userscript loaded', location.href);
-  observeTitle();
-  const readyFn = () => {
+  observeTitle();   // at document-start
+  mountBadge();     // show immediately
+  mountCopyButton();
+
+  // restore sidebar after paint
+  addEventListener('pageshow', () => setTimeout(() => { ensureTitle(); restoreScroll(); focusLast(); }, 0));
+  ready(() => {
     const idx = qIndex();
     if (idx) {
       restoreScroll();
@@ -363,6 +316,5 @@
       }, 300);
       setTimeout(()=>clearInterval(iv), 15000);
     }
-  };
-  (document.readyState === 'loading') ? document.addEventListener('DOMContentLoaded', readyFn) : readyFn();
+  });
 })();
