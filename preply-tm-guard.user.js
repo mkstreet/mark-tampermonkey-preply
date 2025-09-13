@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Preply Messages — TM Guard
-// @version      2.7.0
-// @description  Keep [TM] in tab title; persist sidebar scroll; restore last thread; copy FULL thread with per-message separators.
+// @version      2.8.0
+// @description  Keep [TM] in tab title; persist sidebar scroll; restore last thread; copy FULL thread with separators.
 // @namespace    https://github.com/mkstreet
 // @match        https://preply.com/messages*
 // @match        https://preply.com/*/messages*
@@ -18,8 +18,8 @@
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   const addStyle = (css) => { try { (typeof GM_addStyle==='function') ? GM_addStyle(css) : (()=>{ const s=document.createElement('style'); s.textContent=css; document.head.appendChild(s); })(); } catch{} };
 
-  // --- CONFIG: tweak your divider here ---
-  const SEPARATOR = '\n\n────────────────────────────────\n\n'; // change to '\n\n***\n\n' or '\n\n-----\n\n' if you prefer
+  // --- CONFIG ---
+  const SEPARATOR = '\n\n────────────────────────────────\n\n';
 
   // ---------- Title guard ----------
   const PREFIX='[TM] ';
@@ -30,7 +30,7 @@
     ['pushState','replaceState'].forEach(fn=>{ const orig=history[fn]; history[fn]=function(...args){ const r=orig.apply(this,args); queueMicrotask(ensureTitle); return r; };});
     addEventListener('popstate',ensureTitle); addEventListener('visibilitychange',ensureTitle); ensureTitle(); };
 
-  // ---------- UI: badge + toast + copy button ----------
+  // ---------- UI ----------
   addStyle(`#tm-guard-badge{position:fixed;left:8px;bottom:8px;padding:2px 6px;border-radius:6px;background:rgba(0,0,0,.6);color:#fff;font:12px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial,sans-serif;z-index:2147483647;pointer-events:none}
   #tm-toast{position:fixed;right:12px;bottom:12px;max-width:70ch;background:rgba(0,0,0,.85);color:#fff;padding:.5rem .6rem;border-radius:10px;font:12px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial,sans-serif;z-index:2147483647;box-shadow:0 4px 16px rgba(0,0,0,.3)}
   #tm-copy-btn{position:fixed;top:72px;right:12px;padding:.35rem .55rem;border-radius:10px;background:rgba(0,0,0,.6);color:#fff;font:12px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial,sans-serif;z-index:2147483647;border:0;cursor:pointer}
@@ -53,7 +53,14 @@
 
   const findThreadContainer=()=> {
     const candSel = [
-      '[data-qa-id*="thread" i]','[data-qa-id*="chat" i]','[class*="thread" i]','[class*="conversation" i]','[class*="messages" i]','main [role="region"]'
+      '[data-qa-id*="thread" i]',
+      '[data-qa-id*="chat" i]',
+      '[data-qa-id*="conversation" i]',
+      '[data-testid*="message" i]',
+      '[class*="thread" i]',
+      '[class*="conversation" i]',
+      '[class*="messages" i]',
+      'main [role="region"]'
     ];
     const candidates = candSel.map(s=>[...document.querySelectorAll(s)]).flat();
     const sidebar = qIndex();
@@ -74,7 +81,7 @@
     return el;
   };
 
-  // Auto-load older messages by scrolling to the very top repeatedly
+  // Auto-load older messages
   const loadAllAbove=async(el,opts={maxMs:12000,maxPasses:80})=>{
     const t0=performance.now(); let lastHeight=-1; let passes=0;
     el.scrollTop=0; await sleep(200);
@@ -85,20 +92,22 @@
     log('auto-load passes:',passes,'duration(ms):',Math.round(performance.now()-t0));
   };
 
-  // ---------- NEW: per-message extraction with separators ----------
+  // ---------- Per-message extraction (DOM) ----------
   const collectMessageNodes=(container)=>{
     const sel = [
+      // very permissive — hits most chat bubbles
       '[data-qa-id*="message" i]',
       '[data-qa*="message" i]',
       '[data-testid*="message" i]',
+      '[role="listitem"]',
       '[class*="message" i]',
       '[class*="bubble" i]',
       '[class*="msg" i]',
-      'article',
-      '[role="article"]',
+      'article,[role="article"]'
     ].join(',');
     const raw = [...container.querySelectorAll(sel)];
     if(!raw.length) return [container]; // fallback: whole container
+    // keep only top-level matches (not nested duplicates)
     const set = new Set(raw);
     const nodes = [...set].filter(n => ![...set].some(m => m!==n && m.contains(n)));
     nodes.sort((a,b)=> (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) ? -1 : 1);
@@ -113,10 +122,41 @@
     return t;
   };
 
+  // ---------- Text heuristics (when DOM splitting misses) ----------
+  const escapeRe = (s)=> s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+
+  const segmentByHeuristics=(s, sep=SEPARATOR)=>{
+    if(!s) return s;
+    // 1) Ensure a space before times squished into names: "Mark S.03:10" -> "Mark S. 03:10"
+    s = s.replace(/([A-Za-z.])(\d{1,2}:\d{2})(?!\d)/g, '$1 $2');
+
+    // 2) Normalize day/date tokens to be on their own line
+    s = s.replace(/\b(Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+\d{1,2}\s+[A-Za-z]{3}\b/g, '\n$&\n');
+
+    // 3) Insert separator *before* a new message header:
+    //    Preply|Sent|Seen by|NAME (capitalized or ALLCAPS 2–5 chars, allows "Mark S.") + optional space + HH:MM
+    const boundary = new RegExp(`(?<!^)\\s*(?=(?:Preply|Sent|Seen by|[A-Z]{2,5}|[A-Z][A-Za-z]+(?:\\s[A-Z][A-Za-z.]+)*)\\s?\\d{1,2}:\\d{2}\\b)`, 'g');
+    s = s.replace(boundary, sep);
+
+    // 4) Also split before standalone day/date stamps (if not already)
+    const dateHead = /(?<!^)\s*(?=(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+\d{1,2}\s+[A-Za-z]{3}\b)/g;
+    s = s.replace(dateHead, sep);
+
+    // 5) Collapse duplicates and tidy
+    s = s.replace(new RegExp(`${escapeRe(sep)}{2,}`, 'g'), sep);
+    s = s.replace(/\n{3,}/g, '\n\n').trim();
+    return s;
+  };
+
   const extractThreadText=(container, {separator=SEPARATOR}={})=>{
     const msgs = collectMessageNodes(container).map(cleanNodeText).filter(Boolean);
-    if(!msgs.length){ return (container.innerText||'').trim(); }
-    return msgs.join(separator);
+    if(msgs.length >= 3) { // good DOM hit
+      return msgs.join(separator);
+    }
+    // Fallback to heuristics on the whole text
+    const whole = (container.innerText||'').trim();
+    const segmented = segmentByHeuristics(whole, separator);
+    return segmented || whole;
   };
 
   // ---------- Clipboard ----------
@@ -134,9 +174,13 @@
       if(deep) await loadAllAbove(container);
       const text = extractThreadText(container,{separator:SEPARATOR});
       if(!text){ toast('TM: Thread is empty or not detected.'); log('copyThread: empty'); return; }
+
+      // Show how many messages we think we have (rough estimate)
+      const count = text.split(SEPARATOR).length;
+
       const ok = await copyToClipboard(text);
-      toast(ok ? `TM: Thread copied (${text.length.toLocaleString()} chars).` : 'TM: Copy failed (clipboard blocked).');
-      log('copied thread chars:', text.length);
+      toast(ok ? `TM: Thread copied (${count} parts, ${text.length.toLocaleString()} chars).` : 'TM: Copy failed (clipboard blocked).');
+      log('copied thread parts:', count, 'chars:', text.length);
     }catch(e){ log('copyThread error:',e); toast('TM: Error while copying thread (see console).'); }
   };
 
